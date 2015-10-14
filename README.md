@@ -5,7 +5,9 @@ This code supports multiple types of LED strips.  Initially WS2801,WS2811/12 str
 Different features are available for addressable and non-addresable strips.
 
 TODO:
-1. Clean up warnings.
-1. Add support for PWM single-color and multi-color strips.
-1. Support to control more than one strip.
-1. Port away from Arduino-IDE to pure AVR-gcc build.
+<ol>
+<li>Clean up warnings.</li>
+<li>Add support for PWM single-color and multi-color strips.</li>
+<li>Support controlling more than one strip.</li>
+<li>Port away from Arduino-IDE to pure AVR-gcc build.</li>
+</ol>
