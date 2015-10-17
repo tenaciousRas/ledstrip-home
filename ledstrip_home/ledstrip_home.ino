@@ -39,20 +39,42 @@
  */
 #include <EEPROM.h>
 #include <SPI.h>
-#include "Obi.h"
 #include "SoftwareSerial.h"
+#include "avr/pgmspace.h"
 #include "Adafruit_WS2801.h"
 #include "ledstrip_home.h"
+#define OBI_RX 4
+#define OBI_TX 6
+#include "Obi.h"
 
-#define _VERSION 4  // it's probably more like v.100
+#define _VERSION 5  // it's probably more like v.100
 #define DEBUG_MODE 1
 
-Obi btModule = Obi(4, 6);
+#define STRIP_TYPE_WS2801 1
+#define STRIP_TYPE_WS2811 2  // TODO support
+#define STRIP_TYPE_WS2812 3  // TODO support
+#define STRIP_TYPE_PWM  10
 
 // LED Strip setup
-// Set the first variable to the NUMBER of pixels. 25 = 25 pixels in a row
-#define NUM_LEDS 32
-Adafruit_WS2801 strip = Adafruit_WS2801(NUM_LEDS);
+// set number of LED strips
+#define NUM_STRIPS 2
+// Set number of pixels in an addressable strip. 25 = 25 pixels in a row.
+// Does not apply to single-color and non-addressable RGB strips.
+#define NUM_LEDS_SPARKFUN_WS2801_1METER 10
+// Set number color of PWM STRIPs
+#define NUM_LEDS_PWM_WHITE_STRIP  1  // single color PWM
+#define NUM_LEDS_PWM_RGB_STRIP  3  // RGB PWM
+
+uint8_t  stripType[NUM_STRIPS] = {STRIP_TYPE_PWM, STRIP_TYPE_WS2801};
+uint8_t  stripNumPixels[NUM_STRIPS] = {1, NUM_LEDS_SPARKFUN_WS2801_1METER};  // 1 for PWM strip
+uint8_t  stripNumColorsPerPixel[NUM_STRIPS] = {NUM_LEDS_PWM_RGB_STRIP, 3};
+// Initialize strip variables.  Interesting C implementation.  Define two arrays, one for 
+// addressable strips, one for PWM.  Effectively define position of strips by populating specific members 
+// of each array.
+// FIXME improve implementation
+Adafruit_WS2801 addressableStrip1 = Adafruit_WS2801(NUM_LEDS_SPARKFUN_WS2801_1METER);
+Adafruit_WS2801* addressableStrips[NUM_STRIPS] = {NULL, &addressableStrip1};
+uint8_t  pwmStripPins[NUM_STRIPS][NUM_LEDS_PWM_RGB_STRIP] = { {5, 9, 3}, {} };
 
 #define OFF 0x000000
 #define RED 0xFF0000
@@ -94,30 +116,44 @@ Adafruit_WS2801 strip = Adafruit_WS2801(NUM_LEDS);
 #define INITIAL_MULTI_COLOR_ALT_STATE 0;
 #define DEFAULT_LED_STRIP_BRIGHTNESS 1.0;
 
-led_strip_disp_state stripState;
+led_strip_disp_state stripState[NUM_STRIPS];
+uint8_t remoteControlStripIndex;
 
-unsigned long multiColorNextColorTime;
-unsigned long ledColor[NUM_LEDS] = {TWYELLOW, TWBLUE, OFF};
+unsigned long multiColorNextColorTime[NUM_STRIPS];
+unsigned long ledColor[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = { 
+  {RED, OFF},
+  {TWYELLOW, TWBLUE} 
+//  {RED, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF}, 
+//  {TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE}
+  };
 
 #define LED_FADE_STEPS 16;
 #define LED_FADE_STEP_DELAY_MS 50;  // microsecs between fade steps
-unsigned long ledColorOld[NUM_LEDS] = {TWYELLOW, TWBLUE, OFF};  // color before fade
-unsigned long ledColorFadeTo[NUM_LEDS] = {TWYELLOW, TWBLUE, OFF};    // fade-to color
-unsigned long ledFadeStepTime;  // time to next fade step
-int ledFadeStepIndex;  // color distance divided by LED_FADE_STEPS
-double ledFadeStep[NUM_LEDS][3];
-uint8_t  rainbowStepIndex = 0;
+prog_uint32_t ledColorOld[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = { 
+  {RED, OFF},
+  {TWYELLOW, TWBLUE} 
+  };  // color before fade
+prog_uint32_t ledColorFadeTo[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = { 
+  {RED, OFF},
+  {TWYELLOW, TWBLUE} 
+  };    // fade-to color
+unsigned long ledFadeStepTime[NUM_STRIPS];  // time to next fade step
+int ledFadeStepIndex[NUM_STRIPS];  // color distance divided by LED_FADE_STEPS
+double ledFadeStep[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER][3];  // 3 for each RGB component
+uint8_t  rainbowStepIndex[NUM_STRIPS] = {0, 0};
 
 int eepromAddyStripState = 4;  // eeprom addy to store strip state
 
+Obi btModule = Obi(OBI_RX, OBI_TX);
+
 void setup() {
-  initStripState();
   // set the data rate for bt device
   Serial.begin(9600);
 #ifdef DEBUG_MODE
-  Serial.print("startup\n");
+  Serial.print(F("startup\n"));
 #endif
   // send init data
+  btModule.registerFunction(setRemoteControlStripIndex, 'n');
   btModule.registerFunction(setLEDStripColor, 'c');
   btModule.registerFunction(setDispMode, 'm');
   btModule.registerFunction(setBright, 'b');
@@ -127,81 +163,84 @@ void setup() {
   btModule.begin(9600);
   btModule.send("arduino led controller connected via bluetooth.\n");
 #ifdef DEBUG_MODE
-  Serial.print("configured bt\n");
+  Serial.print(F("configured bt\n"));
 #endif
-  // read eeprom
-  readStripState(&stripState);
-  // setup LEDs
-  setDispModeColors(stripState.dispMode);
-  strip.begin();
-  strip.show();
+  remoteControlStripIndex = 0;
+  for (int i = 0; i <= NUM_STRIPS; i++) {
+    initStripState(i);
+    // read eeprom
+    readStripState(&stripState[i]);
+    // setup LEDs
+    setDispModeColors(i, stripState[i].dispMode);
+  }
+  addressableStrips[1]->begin();
+  addressableStrips[1]->show();
 }
 
 void loop() {
   btModule.receive(); // receive BT events
-  if ((stripState.ledFadeMode == 0)
-        || (stripState.ledFadeMode == 1 && !stripState.fading)) {
-    renderPixels();
-  }
-  if (stripState.fading) {
-    doFade();
-    return;
-  }
-  switch(stripState.dispMode) {
-    case 0:
-      solidOneColor();
-      break;
-    case 1:
-      solidTwoColors();
-      break;
-    case 2:
-      solidTwoColors();
-      break;
-    case 10:
-      solidTwoColors();
-      break;
-    case 11:
-      solidThreeColors();
-      break;
-    case 12:
-      alternatingTwoColors();
-      break;
-    case 13:
-      alternatingTwoColors();
-      break;
-    case 14:
-      alternatingThreeColors();
-      break;
-    case 15:
-      alternatingTwoRandomColors();
-      break;
-    case 20:
-      rainbow(1000);
-      break;
-    case 21:
-      rainbowCycle(1000);
-      break;
-    case 22:
-      randomCandy();
-      break;
-    case 30:
-      break;
-    default:
-      break;
+  for (int i = 0; i < NUM_STRIPS; i++) {
+    if (stripState[i].fading) {
+      doFade(i);
+      renderPixels(i);
+      continue;
+    }
+    switch(stripState[i].dispMode) {
+      case 0:
+        solidOneColor(i);
+        break;
+      case 1:
+        solidTwoColors(i);
+        break;
+      case 2:
+        solidTwoColors(i);
+        break;
+      case 10:
+        solidTwoColors(i);
+        break;
+      case 11:
+        solidThreeColors(i);
+        break;
+      case 12:
+        alternatingTwoColors(i);
+        break;
+      case 13:
+        alternatingTwoColors(i);
+        break;
+      case 14:
+        alternatingThreeColors(i);
+        break;
+      case 15:
+        alternatingTwoRandomColors(i);
+        break;
+      case 20:
+        rainbow(i, 1000);
+        break;
+      case 21:
+        rainbowCycle(i, 1000);
+        break;
+      case 22:
+        randomCandy(i);
+        break;
+      case 30:
+        break;
+      default:
+        break;
+    }
   }
 }
 
-void initStripState() {
-  stripState.fading = false;
-  stripState.dispMode = DEFAULT_DISP_MODE;
-  stripState.ledFadeMode = DEFAULT_LED_FADE_MODE;
-  stripState.multiColorAltState = 0;
-  stripState.ledModeColor[0] = TWYELLOW;
-  stripState.ledModeColor[1] = TWBLUE;
-  stripState.ledModeColor[2] = OFF;
-  stripState.multiColorHoldTime = DEFAULT_MULTI_COLOR_HOLD_TIME;
-  stripState.fadeTimeInterval = LED_FADE_STEP_DELAY_MS;
-  stripState.ledStripBrightness = DEFAULT_LED_STRIP_BRIGHTNESS;
+void initStripState(uint8_t stripNum) {
+  stripState[stripNum].fading = false;
+  stripState[stripNum].dispMode = DEFAULT_DISP_MODE;
+  stripState[stripNum].ledFadeMode = DEFAULT_LED_FADE_MODE;
+  stripState[stripNum].multiColorAltState = 0;
+  stripState[stripNum].ledModeColor[0] = TWYELLOW;
+  stripState[stripNum].ledModeColor[1] = TWBLUE;
+  stripState[stripNum].ledModeColor[2] = OFF;
+  stripState[stripNum].multiColorHoldTime = DEFAULT_MULTI_COLOR_HOLD_TIME;
+  stripState[stripNum].fadeTimeInterval = LED_FADE_STEP_DELAY_MS;
+  stripState[stripNum].ledStripBrightness = DEFAULT_LED_STRIP_BRIGHTNESS;
 }
 
 void readStripState(led_strip_disp_state* ret) {
@@ -237,9 +276,9 @@ void readStripState(led_strip_disp_state* ret) {
   }
   ret->ledStripBrightness = (float) storedLedStripBrightness / (float) 1024;
 #ifdef DEBUG_MODE
-  Serial.print("multiColorHoldTime = ");
-  Serial.print(ret->multiColorHoldTime);
-  Serial.print("\nread eeprom done\n");
+  Serial.print(F("multiColorHoldTime = "));
+  Serial.print((ret->multiColorHoldTime));
+  Serial.print(F("\nread eeprom done\n"));
 #endif
 }
 
@@ -281,21 +320,21 @@ void putStripState(led_strip_disp_state* lsds) {
     offset += 2;
   }
 #ifdef DEBUG_MODE
-  Serial.print("write eeprom done\n");
+  Serial.print(F("write eeprom done\n"));
 #endif
 }
 
-void setDispModeColors(int mode) {
+void setDispModeColors(uint8_t stripNum, int mode) {
   switch(mode) {
     case 0:
       break;
     case 1:
-      stripState.ledModeColor[0] = TWYELLOW;
-      stripState.ledModeColor[1] = TWBLUE;
+      stripState[stripNum].ledModeColor[0] = TWYELLOW;
+      stripState[stripNum].ledModeColor[1] = TWBLUE;
       break;
     case 2:
-      stripState.ledModeColor[0] = random(0xFFFFFF);
-      stripState.ledModeColor[1] = random(0xFFFFFF);
+      stripState[stripNum].ledModeColor[0] = random(0xFFFFFF);
+      stripState[stripNum].ledModeColor[1] = random(0xFFFFFF);
       break;
     case 10:
       break;
@@ -304,30 +343,46 @@ void setDispModeColors(int mode) {
     case 12:
       break;
     case 13:
-      stripState.ledModeColor[0] = TWYELLOW;
-      stripState.ledModeColor[1] = TWBLUE;
+      stripState[stripNum].ledModeColor[0] = TWYELLOW;
+      stripState[stripNum].ledModeColor[1] = TWBLUE;
       break;
     case 14:
       break;
     case 15:
-      stripState.ledModeColor[0] = random(0xFFFFFF);
-      stripState.ledModeColor[1] = random(0xFFFFFF);
+      stripState[stripNum].ledModeColor[0] = random(0xFFFFFF);
+      stripState[stripNum].ledModeColor[1] = random(0xFFFFFF);
       break;
     case 20:
-      rainbowStepIndex = 0;
+      rainbowStepIndex[stripNum] = 0;
       break;
     case 21:
-      rainbowStepIndex = 0;
+      rainbowStepIndex[stripNum] = 0;
       break;
     case 22:
-      rainbowStepIndex = 0;
+      rainbowStepIndex[stripNum] = 0;
       break;
     case 30:
       break;
     default:
       break;
   }
-  putStripState(&stripState);
+  putStripState(&stripState[stripNum]);
+}
+
+void setRemoteControlStripIndex(byte flag, byte numOfValues) {
+  int bData;
+  bData = btModule.getInt();
+  if (0 > bData) {
+    bData = 0;
+  }
+  if (bData > NUM_STRIPS - 1) {
+    bData = NUM_STRIPS - 1;
+  }
+  remoteControlStripIndex = bData;
+#ifdef DEBUG_MODE
+Serial.print(F("remoteControlStripIndex = "));
+Serial.print(remoteControlStripIndex);
+#endif
 }
 
 void setLEDStripColor(byte flag, byte numOfValues) {
@@ -348,277 +403,267 @@ void setLEDStripColor(byte flag, byte numOfValues) {
   int colorIndex = atoi((char *) b1);
   unsigned long color = atol((char *) b2);
   color = (color << 8) >> 8;
-  stripState.ledModeColor[colorIndex] = color;
-  putStripState(&stripState);
+  stripState[remoteControlStripIndex].ledModeColor[colorIndex] = color;
+  putStripState(&stripState[remoteControlStripIndex]);
 #ifdef DEBUG_MODE
-Serial.print("colorIndex = ");
+Serial.print(F("colorIndex = "));
 Serial.print(colorIndex);
-Serial.print(",");
-Serial.print("color = ");
+Serial.print(F(","));
+Serial.print(F("color = "));
 Serial.print(color);
-Serial.print("\n");
+Serial.print(F("\n"));
 Serial.println(data);
-Serial.print("\n");
+Serial.print(F("\n"));
 #endif
 }
 
 void setDispMode(byte flag, byte numOfValues) {
-  char data[8];
   int bData;
   bData = btModule.getInt();
-  stripState.dispMode = bData;
-  setDispModeColors(stripState.dispMode);
-  stripState.multiColorAltState = INITIAL_MULTI_COLOR_ALT_STATE;
-  stripState.fading = false;
-  putStripState(&stripState);
+  stripState[remoteControlStripIndex].dispMode = bData;
+  setDispModeColors(remoteControlStripIndex, stripState[remoteControlStripIndex].dispMode);
+  stripState[remoteControlStripIndex].multiColorAltState = INITIAL_MULTI_COLOR_ALT_STATE;
+  stripState[remoteControlStripIndex].fading = false;
+  putStripState(&stripState[remoteControlStripIndex]);
 #ifdef DEBUG_MODE
-Serial.print("dispMode = ");
+Serial.print(F("dispMode = "));
 Serial.print((int) bData);
-Serial.print(", ");
-Serial.print(stripState.dispMode);
-Serial.print("\n");
+Serial.print(F(", "));
+Serial.print(stripState[remoteControlStripIndex].dispMode);
+Serial.print(F("\n"));
 #endif
 }
 
 void setBright(byte flag, byte numOfValues) {
   int bData;
   bData = btModule.getInt();
-  if (1024 < bData) {
-    bData = 1024;
+  if (255 < bData) {
+    bData = 255;
   }
-  stripState.ledStripBrightness = (float) bData / (float) 1024.0;
-  putStripState(&stripState);
+  stripState[remoteControlStripIndex].ledStripBrightness = (float) bData / (float) 255.0;
+  putStripState(&stripState[remoteControlStripIndex]);
 #ifdef DEBUG_MODE
-Serial.print("ledStripBrightness = ");
+Serial.print(F("ledStripBrightness = "));
 Serial.print(bData);
-//Serial.print(", ");
-//Serial.print((float) stripState.ledStripBrightness);
-Serial.print("\n");
+Serial.print(F(", "));
+Serial.print((float) stripState[remoteControlStripIndex].ledStripBrightness);
+Serial.print(F("\n"));
 #endif
 }
 
 void setLedFadeTimeInterval(byte flag, byte numOfValues) {
   unsigned long bData;
   bData = btModule.getLong();
-  stripState.fadeTimeInterval = bData;
-  putStripState(&stripState);
+  stripState[remoteControlStripIndex].fadeTimeInterval = bData;
+  putStripState(&stripState[remoteControlStripIndex]);
 }
 
 void setMultiColorHoldTime(byte flag, byte numOfValues) {
   unsigned long bData;
   bData = btModule.getInt();
-  stripState.multiColorHoldTime = bData;
-  putStripState(&stripState);
+  stripState[remoteControlStripIndex].multiColorHoldTime = bData;
+  putStripState(&stripState[remoteControlStripIndex]);
 }
 
 void setLedFadeMode(byte flag, byte numOfValues) {
   unsigned int bData;
   bData = btModule.getInt();
-  if (11 < stripState.dispMode) {
+  if (11 < stripState[remoteControlStripIndex].dispMode) {
     // only for solid colors
     return;
   }
   if (1 < bData) {
     bData = 0;
   }
-  stripState.ledFadeMode = bData;
-  putStripState(&stripState);
+  stripState[remoteControlStripIndex].ledFadeMode = bData;
+  putStripState(&stripState[remoteControlStripIndex]);
 #ifdef DEBUG_MODE
-Serial.print("ledFadeMode = ");
-Serial.print(stripState.ledFadeMode);
-Serial.print("\n");
+Serial.print(F("ledFadeMode = "));
+Serial.print(stripState[remoteControlStripIndex].ledFadeMode);
+Serial.print(F("\n"));
 #endif
 }
 
-void refreshLEDs() {
-  for (int i = 0; i < NUM_LEDS; i++) {
-    ledColor[i] = 0xFF0000;
-  }
-  colorWipe(50);
-  for (int i = 0; i < NUM_LEDS; i++) {
-    ledColor[i] = 0xFF00;
-  }
-  colorWipe(50);
-  for (int i = 0; i < NUM_LEDS; i++) {
-    ledColor[i] = 0xFF;
-  }
-  colorWipe(50);
+void refreshLEDs(uint8_t stripNum) {
+  // TODO implement with realtime fader
 }
 
-void turnOffLEDs() {
-  for (int i = 0; i < NUM_LEDS; i++) {
-    ledColor[i] = 0x00;
+void turnOffLEDs(uint8_t stripNum) {
+  for (int i = 0; i < stripNumPixels[stripNum]; i++) {
+    ledColor[stripNum][i] = OFF;
   }
-  colorWipe(10);
 }
 
-void white(float brightness) {
-  if (brightness > 1.0) {
-    brightness = 1.0;
+void white(uint8_t stripNum) {
+  for (int i = 0; i < stripNumPixels[stripNum]; i++) {
+    ledColor[stripNum][i] = WHITE;
   }
-  unsigned int whiteness = (int) ((float) 0xFFFFFF * (float) brightness);
-  for (int i = 0; i < NUM_LEDS; i++) {
-    ledColor[i] = whiteness;
-  }
-  colorWipe(10);
 }
 
-void solidMultiColor(int numMultiColors) {
-  if (multiColorNextColorTime - millis() > stripState.multiColorHoldTime) {
-    multiColorNextColorTime = millis() + stripState.multiColorHoldTime;
-    for (int x = (NUM_LEDS - 1) ; x >= 0 ; x--) {
-      ledColorFadeTo[x] = stripState.ledModeColor[stripState.multiColorAltState];
+void solidMultiColor(uint8_t stripNum, int numMultiColors) {
+  if (multiColorNextColorTime[stripNum] - millis() > stripState[stripNum].multiColorHoldTime) {
+    multiColorNextColorTime[stripNum] = millis() + stripState[stripNum].multiColorHoldTime;
+    for (int x = stripNumPixels[stripNum] - 1 ; x >= 0 ; x--) {
+      ledColorFadeTo[stripNum][x] = stripState[stripNum].ledModeColor[stripState[stripNum].multiColorAltState];
     }
 #ifdef DEBUG_MODE
-Serial.print("multiColorAltState,ledModeColor[multiColorAltState] = ");
-Serial.print(stripState.multiColorAltState);
-Serial.print(", ");
-Serial.print(stripState.ledModeColor[stripState.multiColorAltState]);
-Serial.print(", multiColorNextTime,currentMillis = ");
-Serial.print(multiColorNextColorTime);
-Serial.print(", ");
+Serial.print(F("multiColorAltState,ledModeColor[multiColorAltState] = "));
+Serial.print(stripState[stripNum].multiColorAltState);
+Serial.print(F(", "));
+Serial.print(stripState[stripNum].ledModeColor[stripState[stripNum].multiColorAltState]);
+Serial.print(F(", multiColorNextTime,currentMillis = "));
+Serial.print(multiColorNextColorTime[stripNum]);
+Serial.print(F(", "));
 Serial.print(millis());
-Serial.print("\n");
+Serial.print(F("\n"));
 #endif
-    stripState.multiColorAltState = (stripState.multiColorAltState + 1) % numMultiColors;
-    startFade();
+    stripState[stripNum].multiColorAltState = (stripState[stripNum].multiColorAltState + 1) % numMultiColors;
+    startFade(stripNum);
   }
 }
 
-void alternatingMultiColor(int numMultiColors) {
-  for (int x = (NUM_LEDS - 1) ; x >= 0 ; x -= numMultiColors) {
+void alternatingMultiColor(uint8_t stripNum, int numMultiColors) {
+  for (int x = (stripNumPixels[stripNum] - 1) ; x >= 0 ; x -= numMultiColors) {
     for (int y = 0; y < numMultiColors; y++) {
-      ledColorFadeTo[x - y] = stripState.ledModeColor[y];
+      ledColorFadeTo[stripNum][x - y] = stripState[stripNum].ledModeColor[y];
     }
   }
-  startFade();
+  startFade(stripNum);
 }
 
-void solidOneColor() {
-  solidMultiColor(1);
+void solidOneColor(uint8_t stripNum) {
+  solidMultiColor(stripNum, 1);
 }
 
-void solidTwoColors() {
-  solidMultiColor(2);
+void solidTwoColors(uint8_t stripNum) {
+  solidMultiColor(stripNum, 2);
 }
 
-void solidThreeColors() {
-  solidMultiColor(3);
+void solidThreeColors(uint8_t stripNum) {
+  solidMultiColor(stripNum, 3);
 }
 
-void alternatingTwoColors() {
-  alternatingMultiColor(2);
+void alternatingTwoColors(uint8_t stripNum) {
+  alternatingMultiColor(stripNum, 2);
 }
 
-void alternatingTwoRandomColors() {
-  alternatingMultiColor(2);
+void alternatingTwoRandomColors(uint8_t stripNum) {
+  alternatingMultiColor(stripNum, 2);
 }
 
-void alternatingThreeColors() {
-  alternatingMultiColor(3);
+void alternatingThreeColors(uint8_t stripNum) {
+  alternatingMultiColor(stripNum, 3);
 }
 
-void startFade() {
-  stripState.fading = true;
+void startFade(uint8_t stripNum) {
+  stripState[stripNum].fading = true;
   unsigned int ledFadeSteps = LED_FADE_STEPS;
   long colorDist;
-  multiColorNextColorTime += (stripState.fadeTimeInterval * ledFadeSteps);
-  switch (stripState.ledFadeMode) {
+  uint32_t  rLedColor, rLedColorOld, rLedColorFadeTo;
+  multiColorNextColorTime[stripNum] += (stripState[stripNum].fadeTimeInterval * ledFadeSteps);
+  switch (stripState[stripNum].ledFadeMode) {
     case 0:
-      ledFadeStepTime = 0;
-      ledFadeStepIndex = 0;
-      for (int x = (NUM_LEDS - 1) ; x >= 0 ; x--) {
-        ledColorOld[x] = ledColor[x];
-        colorDist = ledColorFadeTo[x] - ledColorOld[x];
-        ledFadeStep[x][0] = (double) (colorDist >> 16) / (double) ledFadeSteps;
-        ledFadeStep[x][1] = (double) ((colorDist >> 8) & 0xFF) / (double) ledFadeSteps;
-        ledFadeStep[x][2] = (double) (colorDist & 0xFF) / (double) ledFadeSteps;
+      ledFadeStepTime[stripNum] = 0;
+      ledFadeStepIndex[stripNum] = 0;
+      for (int x = (stripNumPixels[stripNum] - 1) ; x >= 0 ; x--) {
+        rLedColor = pgm_read_dword(ledColor + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
+        rLedColorOld = pgm_read_dword(ledColorOld + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
+        rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
+        ledColorOld[stripNum][x] = rLedColor;
+        colorDist = rLedColorFadeTo - rLedColorOld;
+        ledFadeStep[stripNum][x][0] = (double) (colorDist >> 16) / (double) ledFadeSteps;
+        ledFadeStep[stripNum][x][1] = (double) ((colorDist >> 8) & 0xFF) / (double) ledFadeSteps;
+        ledFadeStep[stripNum][x][2] = (double) (colorDist & 0xFF) / (double) ledFadeSteps;
         if (0 > colorDist) {
-          ledFadeStep[x][1] *= -1;
-          ledFadeStep[x][2] *= -1;
+          ledFadeStep[stripNum][x][1] *= -1;
+          ledFadeStep[stripNum][x][2] *= -1;
         }
-      }
-/*
 #ifdef DEBUG_MODE
-Serial.print("startFade -- ");
-Serial.print("ledColorOld[x] = ");
-Serial.print(ledColorOld[x]);
-Serial.print(" | ");
-Serial.print("ledColorFadeTo[x] = ");
-Serial.print(ledColorFadeTo[x]);
-Serial.print(" | ");
-Serial.print("ledFadeStep[x] = ");
+Serial.print(F("startFade for stripNum -- "));
+Serial.print(stripNum);
+Serial.print(F("; ledColorOld[x] = "));
+Serial.print(rLedColorOld);
+Serial.print(F(" | "));
+Serial.print(F("ledColorFadeTo[x] = "));
+Serial.print(rLedColorFadeTo);
+Serial.print(F(" | "));
+Serial.print(F("ledFadeStep[x] = "));
 Serial.print(colorDist & 0xFF);
-Serial.print(",");
-Serial.print(ledFadeStep[x][0]);
-Serial.print(",");
-Serial.print(ledFadeStep[x][1]);
-Serial.print(",");
-Serial.print(ledFadeStep[x][2]);
-Serial.print("\n");
+Serial.print(F(","));
+Serial.print(ledFadeStep[stripNum][x][0]);
+Serial.print(F(","));
+Serial.print(ledFadeStep[stripNum][x][1]);
+Serial.print(F(","));
+Serial.print(ledFadeStep[stripNum][x][2]);
+Serial.print(F("\n"));
 #endif
-*/
+      }
       break;
     case 1:
     default:
-      for (int x = (NUM_LEDS - 1) ; x >= 0 ; x--) {
-        ledColorOld[x] = ledColor[x];
-        ledColor[x] = ledColorFadeTo[x];
+      for (int x = (stripNumPixels[stripNum] - 1) ; x >= 0 ; x--) {
+        rLedColor = pgm_read_dword(ledColor + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
+        rLedColorOld = pgm_read_dword(ledColorOld + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
+        rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
+        ledColorOld[stripNum][x] = rLedColor;
+        ledColor[stripNum][x] = rLedColorFadeTo;
       }
       break;
   }
 }
 
-void doFade() {
-  if (!stripState.fading) { return; }
-  unsigned int ledFadeSteps = LED_FADE_STEPS;
-  switch (stripState.ledFadeMode) {
+void doFade(uint8_t stripNum) {
+  if (!stripState[stripNum].fading) { return; }
+  uint16_t ledFadeSteps = LED_FADE_STEPS;
+  uint32_t  rLedColor, rLedColorOld, rLedColorFadeTo;
+  switch (stripState[stripNum].ledFadeMode) {
     case 0:
       int x, y;
-      if (ledFadeStepIndex >= ledFadeSteps) {
+      if ((uint16_t) ledFadeStepIndex[stripNum] >= ledFadeSteps) {
         // finished, set end color
-        for (x = (NUM_LEDS - 1) ; x >= 0 ; x--) {
-          ledColor[x] = ledColorFadeTo[x];
+        for (x = (stripNumPixels[stripNum] - 1) ; x >= 0 ; x--) {
+          rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
+          ledColor[stripNum][x] = rLedColorFadeTo;
         }
-        stripState.fading = false;
+        stripState[stripNum].fading = false;
       }
-      if (ledFadeStepTime - millis() > stripState.fadeTimeInterval) {
-        unsigned long newColor;
-        for (x = (NUM_LEDS - 1) ; x >= 0 ; x--) {
-          newColor = ledColorOld[x];
+      if (ledFadeStepTime[stripNum] - millis() > stripState[stripNum].fadeTimeInterval) {
+        uint32_t newColor;
+        for (x = (stripNumPixels[stripNum] - 1) ; x >= 0 ; x--) {
+          newColor = pgm_read_dword(ledColorOld + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
           for (y = 2; y >= 0; y--) {
-            if (0 > ledFadeStep[x][y]) {
-              newColor -= (long) ((long) ((double) ledFadeStepIndex * -ledFadeStep[x][y]) << (y * 8));
+            if (0 > ledFadeStep[stripNum][x][y]) {
+              newColor -= (long) ((long) ((double) ledFadeStepIndex[stripNum] * -ledFadeStep[stripNum][x][y]) << (y * 8));
             } else {
-              newColor += (long) ((unsigned long) ((double) ledFadeStepIndex * ledFadeStep[x][y]) << (y * 8));
+              newColor += (long) ((unsigned long) ((double) ledFadeStepIndex[stripNum] * ledFadeStep[stripNum][x][y]) << (y * 8));
             }
           }
-          ledColor[x] = newColor;
+          ledColor[stripNum][x] = newColor;
         }
-        ledFadeStepIndex++;
-        ledFadeStepTime = millis() + stripState.fadeTimeInterval;
+        ledFadeStepIndex[stripNum]++;
+        ledFadeStepTime[stripNum] = millis() + stripState[stripNum].fadeTimeInterval;
 /*
 #ifdef DEBUG_MODE
-Serial.print("ledFadeStepIndex = ");
+Serial.print(F("ledFadeStepIndex = "));
 Serial.print(ledFadeStepIndex);
-Serial.print(" | ");
-Serial.print("ledFadeStep[0][0] = ");
+Serial.print(F(" | "));
+Serial.print(F("ledFadeStep[0][0] = "));
 Serial.print(ledFadeStep[0][0]);
-Serial.print(" | ");
-Serial.print("ledColorOld[0] = ");
+Serial.print(F(" | "));
+Serial.print(F("ledColorOld[0] = "));
 Serial.print(ledColorOld[0]);
-Serial.print(" | ");
-Serial.print("ledColor[0] = ");
+Serial.print(F(" | "));
+Serial.print(F("ledColor[0] = "));
 Serial.print(ledColor[0]);
-Serial.print("\n");
+Serial.print(F("\n"));
 #endif
 */
       }
       break;
     case 1:
     default:
-      colorWipe(ledFadeSteps * stripState.fadeTimeInterval);
-      stripState.fading = false;
+      colorWipe(stripNum, ledFadeSteps * stripState[stripNum].fadeTimeInterval);
+      stripState[stripNum].fading = false;
       break;
   }
 }
@@ -626,81 +671,103 @@ Serial.print("\n");
 /**
   * Throws random colors down the strip array.
   */
-void randomCandy(void) {
-  if (multiColorNextColorTime - millis() > stripState.multiColorHoldTime) {
+void randomCandy(uint8_t stripNum) {
+  if (multiColorNextColorTime[stripNum] - millis() > stripState[stripNum].multiColorHoldTime) {
     //get new RGB color
     unsigned long new_color = random(0xFFFFFF);
     // move old color down chain
-    for (int x = (NUM_LEDS - 1) ; x > 0 ; x--) {
-      ledColor[x] = ledColor[x - 1];
+    for (int x = (stripNumPixels[stripNum] - 1) ; x > 0 ; x--) {
+      ledColor[stripNum][x] = ledColor[stripNum][x - 1];
     }
     // set new led color
-    ledColor[0] = new_color;
-    multiColorNextColorTime = millis() + stripState.multiColorHoldTime;
+    ledColor[stripNum][0] = new_color;
+    multiColorNextColorTime[stripNum] = millis() + stripState[stripNum].multiColorHoldTime;
   }
 }
 
-void rainbow(uint8_t wait) {
-  if (multiColorNextColorTime - millis() > wait) {
+void rainbow(uint8_t stripNum, uint8_t wait) {
+  if (multiColorNextColorTime[stripNum] - millis() > wait) {
     int i;
 
-    if (256 < rainbowStepIndex) {
+    if (256 < rainbowStepIndex[stripNum]) {
       // 3 cycles of all 256 colors in the wheel
-      rainbowStepIndex = 0;
+      rainbowStepIndex[stripNum] = 0;
     }
-    for (i=0; i < strip.numPixels(); i++) {
-      ledColor[i] = wheel((i + rainbowStepIndex) % 255);
+    for (i = 0; i < stripNumPixels[stripNum]; i++) {
+      ledColor[stripNum][i] = wheel((i + rainbowStepIndex[stripNum]) % 255);
     }
-    rainbowStepIndex++;
-    multiColorNextColorTime = millis() + wait;
+    rainbowStepIndex[stripNum]++;
+    multiColorNextColorTime[stripNum] = millis() + wait;
   }
 }
 
 // Slightly different, this one makes the rainbow wheel equally distributed 
 // along the chain
-void rainbowCycle(uint8_t wait) {
-  if (multiColorNextColorTime - millis() > wait) {
+void rainbowCycle(uint8_t stripNum, uint8_t wait) {
+  if (multiColorNextColorTime[stripNum] - millis() > wait) {
     int i;
-    if (rainbowStepIndex > 256 * 5) {
-      rainbowStepIndex = 0;
+    if (rainbowStepIndex[stripNum] > 256 * 5) {
+      rainbowStepIndex[stripNum] = 0;
     }
-    for (i=0; i < strip.numPixels(); i++) {
+    for (i = 0; i < stripNumPixels[stripNum]; i++) {
       // tricky math! we use each pixel as a fraction of the full 96-color wheel
       // (thats the i / strip.numPixels() part)
       // Then add in j which makes the colors go around per pixel
       // the % 96 is to make the wheel cycle around
-      ledColor[i] =  wheel(((i * 256 / strip.numPixels()) + rainbowStepIndex) % 256);
+      ledColor[stripNum][i] =  wheel(((i * 256 / stripNumPixels[stripNum]) + rainbowStepIndex[stripNum]) % 256);
     }
-    rainbowStepIndex++;
-    multiColorNextColorTime = millis() + wait;
+    rainbowStepIndex[stripNum]++;
+    multiColorNextColorTime[stripNum] = millis() + wait;
   }
 }
 
 // fill the dots one after the other with set colors
 // good for testing purposes
-void colorWipe(uint8_t wait) {
+void colorWipe(uint8_t stripNum, uint8_t wait) {
+  if (stripType[stripNum] != STRIP_TYPE_WS2801 
+      && stripType[stripNum] != STRIP_TYPE_WS2811 
+      && stripType[stripNum] != STRIP_TYPE_WS2812) {
+        return;
+  }
   int i;
-  for (i = 0; i < strip.numPixels(); i++) {
-      strip.setPixelColor(i, ledColor[i]);
-      strip.show();
+  for (i = 0; i < stripNumPixels[stripNum]; i++) {
+      addressableStrips[stripNum]->setPixelColor(i, ledColor[stripNum][i]);
+      addressableStrips[stripNum]->show();
       delay(wait);
   }
 }
 
-void renderPixels() {
-  int i;
-  float brightness = stripState.ledStripBrightness;
-  unsigned long ledColorFadeToChannels[3];
-  ledColorFadeToChannels[0] = ((float) ((ledColor[i] >> 16) & 0xFF) * brightness);
-  ledColorFadeToChannels[1] = ((float) ((ledColor[i] >> 8) & 0xFF) * brightness);
-  ledColorFadeToChannels[2] = ((float) (ledColor[i] & 0xFF) * brightness);
-  for (i = 0; i < strip.numPixels(); i++) {
-    strip.setPixelColor(i, ledColorFadeToChannels[0] << 16 
-        | ledColorFadeToChannels[1] << 8 
-        | ledColorFadeToChannels[2]);
-    //strip.setPixelColor(i, ledColor[i]);
+void renderPixels(uint8_t stripNum) {
+  float brightness = stripState[stripNum].ledStripBrightness;
+  uint32_t ledColorFadeToChannels[stripNumColorsPerPixel[stripNum]];
+  uint32_t rLedColor, rLedColorFadeTo, brightnessCorrectedColor = 0;
+  switch (stripType[stripNum]) {
+    case STRIP_TYPE_PWM:
+      for (int i = 0; i < stripNumPixels[stripNum]; i++) {
+        rLedColor = pgm_read_dword(ledColor + (stripNum * (stripNumPixels[stripNum]) * 2 + i * 2));
+        for (int j = 0; j < stripNumColorsPerPixel[stripNum]; j++) {
+          ledColorFadeToChannels[j] = ((float) ((rLedColor >> (8 * j)) & 0xFF) * brightness);
+          rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + j * 2));
+          analogWrite(pwmStripPins[stripNum][j], rLedColorFadeTo);
+        }
+      }
+      break;
+    case STRIP_TYPE_WS2801:
+    case STRIP_TYPE_WS2811:
+    case STRIP_TYPE_WS2812:
+    default:
+      for (int i = 0; i < stripNumPixels[stripNum]; i++) {
+        rLedColor = pgm_read_dword(ledColor + (stripNum * (stripNumPixels[stripNum]) * 2 + i * 2));
+        for (int j = 0; j < stripNumColorsPerPixel[stripNum]; j++) {
+          ledColorFadeToChannels[j] = ((float) ((ledColor[stripNum][i] >> (8 * j)) & 0xFF) * brightness);
+          rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + j * 2));
+          brightnessCorrectedColor = brightnessCorrectedColor | ((uint32_t) rLedColorFadeTo << (8 * j));  // use rgbColor(...)?
+        }
+        addressableStrips[stripNum]->setPixelColor(i, brightnessCorrectedColor);
+      }
+      addressableStrips[stripNum]->show();
+      break;
   }
-  strip.show();
 }
 
 /* Helper functions */
