@@ -237,7 +237,7 @@ void initStripState(uint8_t stripNum) {
   stripState[stripNum].multiColorAltState = 0;
   stripState[stripNum].ledModeColor[0] = TWYELLOW;
   stripState[stripNum].ledModeColor[1] = TWBLUE;
-  stripState[stripNum].ledModeColor[2] = OFF;
+  stripState[stripNum].ledModeColor[2] = RED;
   stripState[stripNum].multiColorHoldTime = DEFAULT_MULTI_COLOR_HOLD_TIME;
   stripState[stripNum].fadeTimeInterval = LED_FADE_STEP_DELAY_MS;
   stripState[stripNum].ledStripBrightness = DEFAULT_LED_STRIP_BRIGHTNESS;
@@ -567,9 +567,9 @@ void startFade(uint8_t stripNum) {
       ledFadeStepIndex[stripNum] = 0;
       for (int x = (stripNumPixels[stripNum] - 1) ; x >= 0 ; x--) {
         rLedColor = pgm_read_dword(ledColor + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
-        rLedColorOld = pgm_read_dword(ledColorOld + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
         rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
         ledColorOld[stripNum][x] = rLedColor;
+        rLedColorOld = pgm_read_dword(ledColorOld + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
         colorDist = rLedColorFadeTo - rLedColorOld;
         ledFadeStep[stripNum][x][0] = (double) (colorDist >> 16) / (double) ledFadeSteps;
         ledFadeStep[stripNum][x][1] = (double) ((colorDist >> 8) & 0xFF) / (double) ledFadeSteps;
@@ -603,9 +603,8 @@ Serial.print(F("\n"));
     default:
       for (int x = (stripNumPixels[stripNum] - 1) ; x >= 0 ; x--) {
         rLedColor = pgm_read_dword(ledColor + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
-        rLedColorOld = pgm_read_dword(ledColorOld + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
-        rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
         ledColorOld[stripNum][x] = rLedColor;
+        rLedColorOld = pgm_read_dword(ledColorOld + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
         ledColor[stripNum][x] = rLedColorFadeTo;
       }
       break;
