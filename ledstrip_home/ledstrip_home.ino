@@ -40,7 +40,6 @@
 #include <EEPROM.h>
 #include <SPI.h>
 #include "SoftwareSerial.h"
-#include "avr/pgmspace.h"
 #include "Adafruit_WS2801.h"
 #include "ledstrip_home.h"
 #define OBI_RX 4
@@ -129,11 +128,11 @@ unsigned long ledColor[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = {
 
 #define LED_FADE_STEPS 16;
 #define LED_FADE_STEP_DELAY_MS 50;  // microsecs between fade steps
-prog_uint32_t ledColorOld[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = { 
+uint32_t ledColorOld[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = { 
   {RED, OFF},
   {TWYELLOW, TWBLUE} 
   };  // color before fade
-prog_uint32_t ledColorFadeTo[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = { 
+uint32_t ledColorFadeTo[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = { 
   {RED, OFF},
   {TWYELLOW, TWBLUE} 
   };    // fade-to color
@@ -559,18 +558,17 @@ void startFade(uint8_t stripNum) {
   stripState[stripNum].fading = true;
   unsigned int ledFadeSteps = LED_FADE_STEPS;
   long colorDist;
-  uint32_t  rLedColor, rLedColorOld, rLedColorFadeTo;
+  uint32_t  rLedColor, rLedColorOld;
   multiColorNextColorTime[stripNum] += (stripState[stripNum].fadeTimeInterval * ledFadeSteps);
   switch (stripState[stripNum].ledFadeMode) {
     case 0:
       ledFadeStepTime[stripNum] = 0;
       ledFadeStepIndex[stripNum] = 0;
       for (int x = (stripNumPixels[stripNum] - 1) ; x >= 0 ; x--) {
-        rLedColor = pgm_read_dword(ledColor + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
-        rLedColorOld = pgm_read_dword(ledColorOld + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
-        rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
+        rLedColor = ledColor[stripNum][x];
         ledColorOld[stripNum][x] = rLedColor;
-        colorDist = rLedColorFadeTo - rLedColorOld;
+        rLedColorOld = ledColorOld[stripNum][x];
+        colorDist = ledColorFadeTo[stripNum][x] - rLedColorOld;
         ledFadeStep[stripNum][x][0] = (double) (colorDist >> 16) / (double) ledFadeSteps;
         ledFadeStep[stripNum][x][1] = (double) ((colorDist >> 8) & 0xFF) / (double) ledFadeSteps;
         ledFadeStep[stripNum][x][2] = (double) (colorDist & 0xFF) / (double) ledFadeSteps;
@@ -582,10 +580,10 @@ void startFade(uint8_t stripNum) {
 Serial.print(F("startFade for stripNum -- "));
 Serial.print(stripNum);
 Serial.print(F("; ledColorOld[x] = "));
-Serial.print(rLedColorOld);
+Serial.print(ledColorOld[stripNum][x]);
 Serial.print(F(" | "));
 Serial.print(F("ledColorFadeTo[x] = "));
-Serial.print(rLedColorFadeTo);
+Serial.print(ledColorFadeTo[stripNum][x]);
 Serial.print(F(" | "));
 Serial.print(F("ledFadeStep[x] = "));
 Serial.print(colorDist & 0xFF);
@@ -602,11 +600,9 @@ Serial.print(F("\n"));
     case 1:
     default:
       for (int x = (stripNumPixels[stripNum] - 1) ; x >= 0 ; x--) {
-        rLedColor = pgm_read_dword(ledColor + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
-        rLedColorOld = pgm_read_dword(ledColorOld + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
-        rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
+        rLedColor = ledColor[stripNum][x];
         ledColorOld[stripNum][x] = rLedColor;
-        ledColor[stripNum][x] = rLedColorFadeTo;
+        ledColor[stripNum][x] = ledColorFadeTo[stripNum][x];
       }
       break;
   }
@@ -622,7 +618,7 @@ void doFade(uint8_t stripNum) {
       if ((uint16_t) ledFadeStepIndex[stripNum] >= ledFadeSteps) {
         // finished, set end color
         for (x = (stripNumPixels[stripNum] - 1) ; x >= 0 ; x--) {
-          rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
+          rLedColorFadeTo = ledColorFadeTo[stripNum][x];
           ledColor[stripNum][x] = rLedColorFadeTo;
         }
         stripState[stripNum].fading = false;
@@ -630,7 +626,7 @@ void doFade(uint8_t stripNum) {
       if (ledFadeStepTime[stripNum] - millis() > stripState[stripNum].fadeTimeInterval) {
         uint32_t newColor;
         for (x = (stripNumPixels[stripNum] - 1) ; x >= 0 ; x--) {
-          newColor = pgm_read_dword(ledColorOld + (stripNum * (stripNumPixels[stripNum]) * 2 + x * 2));
+          newColor = ledColorOld[stripNum][x];
           for (y = 2; y >= 0; y--) {
             if (0 > ledFadeStep[stripNum][x][y]) {
               newColor -= (long) ((long) ((double) ledFadeStepIndex[stripNum] * -ledFadeStep[stripNum][x][y]) << (y * 8));
@@ -740,15 +736,13 @@ void colorWipe(uint8_t stripNum, uint8_t wait) {
 void renderPixels(uint8_t stripNum) {
   float brightness = stripState[stripNum].ledStripBrightness;
   uint32_t ledColorFadeToChannels[stripNumColorsPerPixel[stripNum]];
-  uint32_t rLedColor, rLedColorFadeTo, brightnessCorrectedColor = 0;
+  uint32_t brightnessCorrectedColor = 0;
   switch (stripType[stripNum]) {
     case STRIP_TYPE_PWM:
       for (int i = 0; i < stripNumPixels[stripNum]; i++) {
-        rLedColor = pgm_read_dword(ledColor + (stripNum * (stripNumPixels[stripNum]) * 2 + i * 2));
         for (int j = 0; j < stripNumColorsPerPixel[stripNum]; j++) {
-          ledColorFadeToChannels[j] = ((float) ((rLedColor >> (8 * j)) & 0xFF) * brightness);
-          rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + j * 2));
-          analogWrite(pwmStripPins[stripNum][j], rLedColorFadeTo);
+          ledColorFadeToChannels[j] = ((float) ((ledColor[stripNum][i] >> (8 * j)) & 0xFF) * brightness);
+          analogWrite(pwmStripPins[stripNum][j], ledColorFadeToChannels[j]);
         }
       }
       break;
@@ -757,11 +751,9 @@ void renderPixels(uint8_t stripNum) {
     case STRIP_TYPE_WS2812:
     default:
       for (int i = 0; i < stripNumPixels[stripNum]; i++) {
-        rLedColor = pgm_read_dword(ledColor + (stripNum * (stripNumPixels[stripNum]) * 2 + i * 2));
         for (int j = 0; j < stripNumColorsPerPixel[stripNum]; j++) {
           ledColorFadeToChannels[j] = ((float) ((ledColor[stripNum][i] >> (8 * j)) & 0xFF) * brightness);
-          rLedColorFadeTo = pgm_read_dword(ledColorFadeTo + (stripNum * (stripNumPixels[stripNum]) * 2 + j * 2));
-          brightnessCorrectedColor = brightnessCorrectedColor | ((uint32_t) rLedColorFadeTo << (8 * j));  // use rgbColor(...)?
+          brightnessCorrectedColor = brightnessCorrectedColor | ((uint32_t) ledColorFadeToChannels[j] << (8 * j));  // use rgbColor(...)?
         }
         addressableStrips[stripNum]->setPixelColor(i, brightnessCorrectedColor);
       }
