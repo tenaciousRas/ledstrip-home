@@ -42,12 +42,15 @@
 #include "SoftwareSerial.h"
 #include "Adafruit_WS2801.h"
 #include "ledstrip_home.h"
-#define OBI_RX 4
-#define OBI_TX 6
+#define OBI_RX 0
+#define OBI_TX 1
 #include "Obi.h"
 
 #define _VERSION 5  // it's probably more like v.100
-#define DEBUG_MODE 1
+//#define DEBUG_MODE 1
+
+// comment out if no POT setup
+#define HAS_POT 1
 
 #define STRIP_TYPE_WS2801 1
 #define STRIP_TYPE_WS2811 2  // TODO support
@@ -56,24 +59,24 @@
 
 // LED Strip setup
 // set number of LED strips
-#define NUM_STRIPS 2
+#define NUM_STRIPS 1
 // Set number of pixels in an addressable strip. 25 = 25 pixels in a row.
 // Does not apply to single-color and non-addressable RGB strips.
-#define NUM_LEDS_SPARKFUN_WS2801_1METER 10
+#define NUM_LEDS_SPARKFUN_WS2801_1METER 32
 // Set number color of PWM STRIPs
 #define NUM_LEDS_PWM_WHITE_STRIP  1  // single color PWM
 #define NUM_LEDS_PWM_RGB_STRIP  3  // RGB PWM
 
-uint8_t  stripType[NUM_STRIPS] = {STRIP_TYPE_PWM, STRIP_TYPE_WS2801};
-uint8_t  stripNumPixels[NUM_STRIPS] = {1, NUM_LEDS_SPARKFUN_WS2801_1METER};  // 1 for PWM strip
-uint8_t  stripNumColorsPerPixel[NUM_STRIPS] = {NUM_LEDS_PWM_RGB_STRIP, 3};
+uint8_t  stripType[NUM_STRIPS] = {STRIP_TYPE_PWM};
+uint8_t  stripNumPixels[NUM_STRIPS] = {1};  // 1 for PWM strip
+uint8_t  stripNumColorsPerPixel[NUM_STRIPS] = {NUM_LEDS_PWM_WHITE_STRIP};
 // Initialize strip variables.  Interesting C implementation.  Define two arrays, one for 
 // addressable strips, one for PWM.  Effectively define position of strips by populating specific members 
 // of each array.
 // FIXME improve implementation
-Adafruit_WS2801 addressableStrip1 = Adafruit_WS2801(NUM_LEDS_SPARKFUN_WS2801_1METER);
-Adafruit_WS2801* addressableStrips[NUM_STRIPS] = {NULL, &addressableStrip1};
-uint8_t  pwmStripPins[NUM_STRIPS][NUM_LEDS_PWM_RGB_STRIP] = { {5, 9, 3}, {} };
+//Adafruit_WS2801 addressableStrip1 = Adafruit_WS2801(NUM_LEDS_SPARKFUN_WS2801_1METER);
+Adafruit_WS2801* addressableStrips[NUM_STRIPS] = {};
+uint8_t  pwmStripPins[NUM_STRIPS][NUM_LEDS_PWM_RGB_STRIP] = { {9} };
 
 #define OFF 0x000000
 #define RED 0xFF0000
@@ -92,6 +95,12 @@ uint8_t  pwmStripPins[NUM_STRIPS][NUM_LEDS_PWM_RGB_STRIP] = { {5, 9, 3}, {} };
 #define DIM_WHITE 0x333333
 #define TWYELLOW 0xFFEE00
 #define TWBLUE 0x00A5D5
+
+// POT setup
+#ifdef HAS_POT
+#define POT_PIN_OUT  2
+#define POT_PIN_IN  A3
+#endif
 
 /**
  * display mode values:
@@ -120,7 +129,6 @@ uint8_t remoteControlStripIndex;
 
 unsigned long multiColorNextColorTime[NUM_STRIPS];
 unsigned long ledColor[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = { 
-  {RED, OFF},
   {TWYELLOW, TWBLUE} 
 //  {RED, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF}, 
 //  {TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE, TWYELLOW, TWBLUE}
@@ -129,25 +137,29 @@ unsigned long ledColor[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = {
 #define LED_FADE_STEPS 16;
 #define LED_FADE_STEP_DELAY_MS 50;  // microsecs between fade steps
 uint32_t ledColorOld[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = { 
-  {RED, OFF},
   {TWYELLOW, TWBLUE} 
   };  // color before fade
 uint32_t ledColorFadeTo[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER] = { 
-  {RED, OFF},
   {TWYELLOW, TWBLUE} 
   };    // fade-to color
 unsigned long ledFadeStepTime[NUM_STRIPS];  // time to next fade step
 int ledFadeStepIndex[NUM_STRIPS];  // color distance divided by LED_FADE_STEPS
 double ledFadeStep[NUM_STRIPS][NUM_LEDS_SPARKFUN_WS2801_1METER][3];  // 3 for each RGB component
-uint8_t  rainbowStepIndex[NUM_STRIPS] = {0, 0};
+uint8_t  rainbowStepIndex[NUM_STRIPS] = {0};
 
 int eepromAddyStripState = 4;  // eeprom addy to store strip state
 
 Obi btModule = Obi(OBI_RX, OBI_TX);
 
+uint8_t brightnessSetByDeviceId = 0;  // 0 for serial/bluetooth; 1 for analog pot
+#ifdef HAS_POT
+float potNewReadingTolerance = 0.1;
+uint32_t potReading = 0;
+#endif
+
 void setup() {
   // set the data rate for bt device
-  Serial.begin(9600);
+//  Serial.begin(9600);
 #ifdef DEBUG_MODE
   Serial.print(F("startup\n"));
 #endif
@@ -170,10 +182,15 @@ void setup() {
     // read eeprom
     readStripState(&stripState[i]);
     // setup LEDs
-    setDispModeColors(i, stripState[i].dispMode);
+     setDispModeColors(i, stripState[i].dispMode);
+    if (stripType[i] == STRIP_TYPE_WS2801) {
+      addressableStrips[i]->begin();
+      addressableStrips[i]->show();
+    }
   }
-  addressableStrips[1]->begin();
-  addressableStrips[1]->show();
+#ifdef HAS_POT
+  digitalWrite(POT_PIN_OUT, HIGH);
+#endif
 }
 
 void loop() {
@@ -234,12 +251,35 @@ void initStripState(uint8_t stripNum) {
   stripState[stripNum].dispMode = DEFAULT_DISP_MODE;
   stripState[stripNum].ledFadeMode = DEFAULT_LED_FADE_MODE;
   stripState[stripNum].multiColorAltState = 0;
-  stripState[stripNum].ledModeColor[0] = TWYELLOW;
-  stripState[stripNum].ledModeColor[1] = TWBLUE;
-  stripState[stripNum].ledModeColor[2] = OFF;
+  stripState[stripNum].ledModeColor[0] = WHITE;
+  stripState[stripNum].ledModeColor[1] = WHITE;
+  stripState[stripNum].ledModeColor[2] = WHITE;
   stripState[stripNum].multiColorHoldTime = DEFAULT_MULTI_COLOR_HOLD_TIME;
   stripState[stripNum].fadeTimeInterval = LED_FADE_STEP_DELAY_MS;
   stripState[stripNum].ledStripBrightness = DEFAULT_LED_STRIP_BRIGHTNESS;
+}
+
+void readPot() {
+  uint32_t newReading;
+#ifdef HAS_POT
+  newReading = analogRead(POT_PIN_IN);
+  uint32_t oldReadingTolerance = newReading * potNewReadingTolerance;
+#endif
+  if (newReading > potReading + oldReadingTolerance
+      || newReading < potReading - oldReadingTolerance) {
+    potReading = newReading;
+    for (int i = 0; i < NUM_STRIPS; i++) {
+      stripState[i].ledStripBrightness = potReading / 4;
+    }
+    putStripState(&stripState[i]);
+#ifdef DEBUG_MODE
+Serial.print(F("ledStripBrightness = "));
+Serial.print(bData);
+Serial.print(F(", "));
+Serial.print((float) stripState[0].ledStripBrightness);
+Serial.print(F("\n"));
+#endif
+  }
 }
 
 void readStripState(led_strip_disp_state* ret) {
@@ -378,6 +418,7 @@ void setRemoteControlStripIndex(byte flag, byte numOfValues) {
     bData = NUM_STRIPS - 1;
   }
   remoteControlStripIndex = bData;
+  btModule.send("OK\n");
 #ifdef DEBUG_MODE
 Serial.print(F("remoteControlStripIndex = "));
 Serial.print(remoteControlStripIndex);
@@ -404,6 +445,7 @@ void setLEDStripColor(byte flag, byte numOfValues) {
   color = (color << 8) >> 8;
   stripState[remoteControlStripIndex].ledModeColor[colorIndex] = color;
   putStripState(&stripState[remoteControlStripIndex]);
+  btModule.send("OK\n");
 #ifdef DEBUG_MODE
 Serial.print(F("colorIndex = "));
 Serial.print(colorIndex);
@@ -424,6 +466,7 @@ void setDispMode(byte flag, byte numOfValues) {
   stripState[remoteControlStripIndex].multiColorAltState = INITIAL_MULTI_COLOR_ALT_STATE;
   stripState[remoteControlStripIndex].fading = false;
   putStripState(&stripState[remoteControlStripIndex]);
+  btModule.send("OK\n");
 #ifdef DEBUG_MODE
 Serial.print(F("dispMode = "));
 Serial.print((int) bData);
@@ -441,6 +484,7 @@ void setBright(byte flag, byte numOfValues) {
   }
   stripState[remoteControlStripIndex].ledStripBrightness = (float) bData / (float) 255.0;
   putStripState(&stripState[remoteControlStripIndex]);
+  btModule.send("OK\n");
 #ifdef DEBUG_MODE
 Serial.print(F("ledStripBrightness = "));
 Serial.print(bData);
@@ -455,6 +499,7 @@ void setLedFadeTimeInterval(byte flag, byte numOfValues) {
   bData = btModule.getLong();
   stripState[remoteControlStripIndex].fadeTimeInterval = bData;
   putStripState(&stripState[remoteControlStripIndex]);
+  btModule.send("OK\n");
 }
 
 void setMultiColorHoldTime(byte flag, byte numOfValues) {
@@ -462,6 +507,7 @@ void setMultiColorHoldTime(byte flag, byte numOfValues) {
   bData = btModule.getInt();
   stripState[remoteControlStripIndex].multiColorHoldTime = bData;
   putStripState(&stripState[remoteControlStripIndex]);
+  btModule.send("OK\n");
 }
 
 void setLedFadeMode(byte flag, byte numOfValues) {
@@ -476,6 +522,7 @@ void setLedFadeMode(byte flag, byte numOfValues) {
   }
   stripState[remoteControlStripIndex].ledFadeMode = bData;
   putStripState(&stripState[remoteControlStripIndex]);
+  btModule.send("OK\n");
 #ifdef DEBUG_MODE
 Serial.print(F("ledFadeMode = "));
 Serial.print(stripState[remoteControlStripIndex].ledFadeMode);
