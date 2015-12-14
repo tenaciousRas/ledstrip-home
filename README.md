@@ -8,6 +8,5 @@ TODO:
 <ol>
 <li>Clean up warnings.</li>
 <li>Add support for PWM single-color and multi-color strips.</li>
-<li>Support controlling more than one strip.</li>
 <li>Port away from Arduino-IDE to pure AVR-gcc build.</li>
 </ol>
