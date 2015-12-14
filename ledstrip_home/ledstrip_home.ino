@@ -165,7 +165,7 @@ void setup() {
   Serial.print(F("configured bt\n"));
 #endif
   remoteControlStripIndex = 0;
-  for (int i = 0; i <= NUM_STRIPS; i++) {
+  for (int i = 0; i < NUM_STRIPS; i++) {
     initStripState(i);
     // read eeprom
     readStripState(&stripState[i]);
